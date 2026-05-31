@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    SAP BW Monitor v1.10 - Proper sapnco.ini support
+    SAP BW Monitor v1.11 - ST22 added
 #>
 
 param(
@@ -25,8 +25,6 @@ if (-not (Test-Path $iniFile)) {
     Write-Host "[ERROR] sapnco.ini not found"
     exit 1
 }
-
-Write-Host "[INFO] Reading destination from: $iniFile"
 
 $config = @{}
 $inSection = $false
@@ -65,32 +63,59 @@ try {
     exit 1
 }
 
-# Report
+# Report Header
 Write-Host "========================================"
-Write-Host "SAP BW Monitor v1.10"
+Write-Host "SAP BW Monitor v1.11"
 Write-Host "Run Time : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 Write-Host "Destination : $Destination"
 Write-Host "========================================"
 
-# SM12
+# ============================================================
+# SM12 (placeholder)
+# ============================================================
 Write-Host ""
 Write-Host "[DEBUG] SM12 failed: Method invocation failed because [SAP.Middleware.Connector.RfcParameter] does not contain a method named 'GetTableParameterList'."
 Write-Host "SM12 - Lock Entries                : 0 locks"
-Write-Host "   Threshold : No obsolete locks > 24 hours"
-Write-Host "   Result    : 0 locks found"
 
-# SM13
+# ============================================================
+# SM13 (placeholder)
+# ============================================================
 Write-Host ""
 Write-Host "[DEBUG] SM13 failed: Exception calling CreateFunction with 1 argument(s): metadata for function TH_DISPLAY_UPDATE not available"
 Write-Host "SM13 - Update Status               : 0 updates"
-Write-Host "   Threshold : No update records in error"
-Write-Host "   Result    : 0 updates found"
 
+# ============================================================
+# ST22 - ABAP Runtime Errors (using RFC_READ_TABLE on SNAP)
+# ============================================================
 Write-Host ""
+Write-Host "ST22 - ABAP Runtime Errors" -NoNewline
+
+try {
+    $func = $dest.Repository.CreateFunction("RFC_READ_TABLE")
+    $func.SetValue("QUERY_TABLE", "SNAP")
+    $func.SetValue("DELIMITER", "|")
+
+    # Get today's date in SAP format (YYYYMMDD)
+    $today = (Get-Date).ToString("yyyyMMdd")
+    $options = $func.GetTable("OPTIONS")
+    $row = $options.AppendRow()
+    $row.SetValue("TEXT", "DATUM = '$today'")
+
+    $func.Invoke($dest)
+
+    $data = $func.GetTable("DATA")
+    $st22Count = $data.Count
+
+    Write-Host "         : $st22Count dumps found today"
+    Write-Host "   Threshold : < 300 logs per hour"
+} catch {
+    Write-Host "         : CHECK MANUALLY (RFC_READ_TABLE failed)"
+}
+
+# Remaining checks
 Write-Host "SMQ1 - Outbound Queue              : CHECK MANUALLY"
 Write-Host "SM51 - Application Server Status   : CHECK MANUALLY"
 Write-Host "SM37 - Job Status                  : CHECK MANUALLY"
-Write-Host "ST22 - ABAP Runtime Errors         : CHECK MANUALLY"
 Write-Host "SMLG - System Response Time        : CHECK MANUALLY"
 Write-Host "DB02 - Log file sync               : CHECK MANUALLY"
 
