@@ -2,7 +2,7 @@
 .SYNOPSIS
     SAP System Monitor using NCo 3.1 (PowerShell)
 .VERSION
-    0.5 - Switched to simpler, more compatible RFCs
+    0.6 - Ported patterns from Java JCo utilities
 #>
 
 param(
@@ -13,7 +13,7 @@ param(
     [bool]$DebugMode = $true
 )
 
-$ScriptVersion = "0.5"
+$ScriptVersion = "0.6"
 $RunTimestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 
 Write-Host "========================================" -ForegroundColor DarkGray
@@ -62,15 +62,13 @@ function Invoke-SimpleRfc {
 Write-Host "Connecting to $Destination..." -ForegroundColor Green
 $dest = Get-NCoDestination -Name $Destination
 
-Write-Host "`n=== SAP Monitoring Checks (Compatible Mode) ===" -ForegroundColor Yellow
+Write-Host "`n=== SAP Monitoring Checks ===" -ForegroundColor Yellow
 
-# 1. System Info (very reliable)
+# 1. System Info (from Java version)
 try {
     $sysInfo = Invoke-SimpleRfc -Destination $dest -FunctionName "RFC_SYSTEM_INFO"
     if ($sysInfo) {
-        $sysId = $sysInfo.GetValue("RFCSI_EXPORT")
         Write-Host "System Info: OK" -ForegroundColor Green
-        if ($DebugMode) { Write-Host "[DEBUG] System ID info retrieved" -ForegroundColor DarkGray }
     }
 } catch { Write-Warning "RFC_SYSTEM_INFO failed" }
 
@@ -82,7 +80,7 @@ try {
     }
 } catch { Write-Warning "TH_SERVER_LIST failed" }
 
-# 3. User List (lightweight)
+# 3. Active Users
 try {
     $users = Invoke-SimpleRfc -Destination $dest -FunctionName "TH_USER_LIST"
     if ($users) {
@@ -90,7 +88,7 @@ try {
     }
 } catch { Write-Warning "TH_USER_LIST failed" }
 
-# 4. Background Jobs (modern BAPI)
+# 4. Background Jobs (BAPI)
 try {
     $jobs = Invoke-SimpleRfc -Destination $dest -FunctionName "BAPI_XBP_JOB_SELECT" -Parameters @{
         JOBNAME   = "*"
