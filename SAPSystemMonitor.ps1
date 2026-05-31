@@ -2,7 +2,7 @@
 .SYNOPSIS
     SAP BW System Monitor (PowerShell + NCo 3.1)
 .VERSION
-    1.5 - Fixed connection message + Read-Table function
+    1.5 - Fixed connection message and restored Read-Table function
 #>
 
 param(
@@ -61,7 +61,6 @@ function Get-SapDestination {
 
     $dest = [SAP.Middleware.Connector.RfcDestinationManager]::GetDestination($props)
     
-    # Return both destination and config
     return @{ Destination = $dest; Config = $config }
 }
 
@@ -73,7 +72,7 @@ $config = $result.Config
 try {
     $ping = $dest.Repository.CreateFunction("RFC_PING")
     $ping.Invoke($dest)
-    Write-Host "[OK] Connected successfully to $Destination (Client $($config.CLIENT))" -ForegroundColor Green
+    Write-Host "[OK] Connected successfully to $Destination (Client $($config.CLIENT)) as $($config.USER)" -ForegroundColor Green
 } catch {
     Write-Error "Connection test failed: $_"
     exit 1
