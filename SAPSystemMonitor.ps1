@@ -2,7 +2,7 @@
 .SYNOPSIS
     SAP BW System Monitor (PowerShell + NCo 3.1)
 .VERSION
-    1.4 - Fixed connection test
+    1.5 - Fixed connection message + Read-Table function
 #>
 
 param(
@@ -13,7 +13,7 @@ param(
     [bool]$DebugMode = $true
 )
 
-$ScriptVersion = "1.4"
+$ScriptVersion = "1.5"
 $RunTimestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 
 Write-Host "========================================" -ForegroundColor DarkGray
@@ -59,12 +59,17 @@ function Get-SapDestination {
     $props["PASSWD"] = $config["PASSWD"]
     $props["LANG"]   = $config["LANG"]
 
-    return [SAP.Middleware.Connector.RfcDestinationManager]::GetDestination($props)
+    $dest = [SAP.Middleware.Connector.RfcDestinationManager]::GetDestination($props)
+    
+    # Return both destination and config
+    return @{ Destination = $dest; Config = $config }
 }
 
-$dest = Get-SapDestination -DestName $Destination
+$result = Get-SapDestination -DestName $Destination
+$dest   = $result.Destination
+$config = $result.Config
 
-# ==================== SIMPLE CONNECTION PROOF ====================
+# ==================== CONNECTION PROOF ====================
 try {
     $ping = $dest.Repository.CreateFunction("RFC_PING")
     $ping.Invoke($dest)
@@ -72,6 +77,24 @@ try {
 } catch {
     Write-Error "Connection test failed: $_"
     exit 1
+}
+
+# ==================== TABLE READER ====================
+function Read-Table {
+    param($Destination, [string]$TableName, [int]$MaxRows = 15)
+    
+    try {
+        $func = $Destination.Repository.CreateFunction("RFC_READ_TABLE")
+        $func.SetValue("QUERY_TABLE", $TableName)
+        $func.SetValue("DELIMITER", "|")
+        $func.SetValue("ROWCOUNT", $MaxRows)
+        
+        $func.Invoke($Destination)
+        return $func.GetTableParameterList().GetTable("DATA")
+    } catch {
+        if ($DebugMode) { Write-Host "[DEBUG] RFC_READ_TABLE on $TableName failed: $_" -ForegroundColor DarkGray }
+        return $null
+    }
 }
 
 # ==================== REPORT ====================
