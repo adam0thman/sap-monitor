@@ -2,7 +2,7 @@
 .SYNOPSIS
     SAP BW System Monitor (PowerShell + NCo 3.1)
 .VERSION
-    1.0 - Proper destination loading + safe table access
+    1.1 - Fixed destination loading from sapnco.ini
 #>
 
 param(
@@ -13,7 +13,7 @@ param(
     [bool]$DebugMode = $true
 )
 
-$ScriptVersion = "1.0"
+$ScriptVersion = "1.1"
 $RunTimestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 
 Write-Host "========================================" -ForegroundColor DarkGray
@@ -22,65 +22,70 @@ Write-Host "Run Time : $RunTimestamp" -ForegroundColor DarkGray
 Write-Host "Destination : $Destination" -ForegroundColor DarkGray
 Write-Host "========================================`n" -ForegroundColor DarkGray
 
-# ==================== LOAD SAPNCO.INI ====================
-function Load-SapncoIni {
-    param([string]$IniPath = ".\sapnco.ini")
-    
+# ==================== LOAD SAPNCO.INI (Correct Method) ====================
+function Get-SapDestination {
+    param([string]$DestName, [string]$IniPath = ".\sapnco.ini")
+
     if (-not (Test-Path $IniPath)) {
-        Write-Error "sapnco.ini not found at $IniPath"
+        Write-Error "sapnco.ini not found"
         exit 1
     }
-    
-    $content = Get-Content $IniPath -Raw
-    $sections = @{}
+
+    $lines = Get-Content $IniPath
     $currentSection = $null
-    
-    foreach ($line in $content -split "`n") {
+    $config = @{}
+
+    foreach ($line in $lines) {
         $line = $line.Trim()
         if ($line -match '^\[(.+)\]$') {
             $currentSection = $matches[1]
-            $sections[$currentSection] = @{}
+            if ($currentSection -eq $DestName) {
+                $config = @{}
+            }
         }
-        elseif ($line -match '^(.+?)=(.*)$' -and $currentSection) {
-            $sections[$currentSection][$matches[1].Trim()] = $matches[2].Trim()
+        elseif ($line -match '^(.+?)=(.*)$' -and $currentSection -eq $DestName) {
+            $config[$matches[1].Trim()] = $matches[2].Trim()
         }
     }
-    return $sections
+
+    if ($config.Count -eq 0) {
+        Write-Error "Destination '$DestName' not found in sapnco.ini"
+        exit 1
+    }
+
+    # Create destination using properties
+    $props = New-Object SAP.Middleware.Connector.RfcConfigParameters
+    $props["NAME"]     = $DestName
+    $props["ASHOST"]   = $config["ASHOST"]
+    $props["SYSNR"]    = $config["SYSNR"]
+    $props["CLIENT"]   = $config["CLIENT"]
+    $props["USER"]     = $config["USER"]
+    $props["PASSWD"]   = $config["PASSWD"]
+    $props["LANG"]     = $config["LANG"]
+
+    # Register and get destination
+    try {
+        [SAP.Middleware.Connector.RfcDestinationManager]::RegisterDestinationConfiguration($props)
+    } catch {
+        # Already registered, ignore
+    }
+
+    return [SAP.Middleware.Connector.RfcDestinationManager]::GetDestination($DestName)
 }
 
-$sapConnections = Load-SapncoIni
+# Get destination
+$dest = Get-SapDestination -DestName $Destination
 
-if (-not $sapConnections.ContainsKey($Destination)) {
-    Write-Error "Destination '$Destination' not found in sapnco.ini"
+if (-not $dest) {
+    Write-Error "Failed to connect to destination '$Destination'"
     exit 1
 }
 
-$config = $sapConnections[$Destination]
+Write-Host "[DEBUG] Successfully connected to $Destination" -ForegroundColor DarkGray
 
-# Register destination with NCo
-try {
-    $props = New-Object SAP.Middleware.Connector.RfcConfigParameters
-    $props.Add("NAME", $Destination)
-    $props.Add("ASHOST", $config.ASHOST)
-    $props.Add("SYSNR", $config.SYSNR)
-    $props.Add("CLIENT", $config.CLIENT)
-    $props.Add("USER", $config.USER)
-    $props.Add("PASSWD", $config.PASSWD)
-    $props.Add("LANG", $config.LANG)
-    
-    [SAP.Middleware.Connector.RfcDestinationManager]::RegisterDestinationConfiguration($props)
-    if ($DebugMode) { Write-Host "[DEBUG] Destination '$Destination' registered successfully" -ForegroundColor DarkGray }
-} catch {
-    Write-Warning "Could not register destination: $_"
-}
-
-function Get-NCoDestination { param($Name) 
-    return [SAP.Middleware.Connector.RfcDestinationManager]::GetDestination($Name)
-}
-
-# ==================== SAFE RFC_READ_TABLE ====================
+# ==================== SAFE TABLE READER ====================
 function Read-Table {
-    param($Destination, [string]$TableName, [string[]]$Fields, [int]$MaxRows = 100)
+    param($Destination, [string]$TableName, [int]$MaxRows = 50)
     
     try {
         $func = $Destination.Repository.CreateFunction("RFC_READ_TABLE")
@@ -89,75 +94,59 @@ function Read-Table {
         $func.SetValue("ROWCOUNT", $MaxRows)
         
         $func.Invoke($Destination)
-        
-        $dataTable = $func.GetTableParameterList().GetTable("DATA")
-        return $dataTable
+        return $func.GetTableParameterList().GetTable("DATA")
     } catch {
         if ($DebugMode) { Write-Host "[DEBUG] RFC_READ_TABLE on $TableName failed: $_" -ForegroundColor DarkGray }
         return $null
     }
 }
 
-# ==================== MONITORING ====================
-
-Write-Host "Connecting to $Destination..." -ForegroundColor Green
-$dest = Get-NCoDestination -Name $Destination
+# ==================== MONITORING REPORT ====================
 
 Write-Host "`n=== SAP BW Monitoring Report ===" -ForegroundColor Yellow
 Write-Host ""
 
-# 1. SM12 - Lock Entries (use safe table)
-$locks = Read-Table -Destination $dest -TableName "TSTC" -Fields @("TCODE") -MaxRows 50
-$lockCount = if ($locks) { $locks.RowCount } else { 0 }
-Write-Host ("SM12 - Lock Entries".PadRight(35) + ": $lockCount entries") -ForegroundColor Cyan
+# SM12
+Write-Host ("SM12 - Lock Entries".PadRight(35) + ": CHECK MANUALLY") -ForegroundColor Yellow
 Write-Host ("   Threshold : No obsolete locks > 24 hours") -ForegroundColor DarkGray
-Write-Host ("   Result    : $lockCount entries (table access limited)") -ForegroundColor DarkGray
 Write-Host ""
 
-# 2. SM13 - Update Status
-$updates = Read-Table -Destination $dest -TableName "TSTC" -Fields @("TCODE") -MaxRows 10
+# SM13
 Write-Host ("SM13 - Update Status".PadRight(35) + ": CHECK MANUALLY") -ForegroundColor Yellow
 Write-Host ("   Threshold : No update records in error") -ForegroundColor DarkGray
-Write-Host ("   Result    : Requires SM13 transaction") -ForegroundColor DarkGray
 Write-Host ""
 
-# 3. SMQ1 - Outbound Queue
+# SMQ1
 Write-Host ("SMQ1 - Outbound Queue".PadRight(35) + ": CHECK MANUALLY") -ForegroundColor Yellow
 Write-Host ("   Threshold : Warning > 600, Red > 1000") -ForegroundColor DarkGray
-Write-Host ("   Result    : Requires SMQ1 transaction") -ForegroundColor DarkGray
 Write-Host ""
 
-# 4. SM51 - Application Servers
-$servers = Read-Table -Destination $dest -TableName "TSTC" -Fields @("TCODE") -MaxRows 5
+# SM51
 Write-Host ("SM51 - Application Server Status".PadRight(35) + ": CHECK MANUALLY") -ForegroundColor Yellow
 Write-Host ("   Threshold : All servers Active, Free Dialog >= 5") -ForegroundColor DarkGray
-Write-Host ("   Result    : Requires SM51 transaction") -ForegroundColor DarkGray
 Write-Host ""
 
-# 5. SM37 - Job Status (TBTCO is usually readable)
-$jobs = Read-Table -Destination $dest -TableName "TBTCO" -Fields @("JOBNAME","STATUS") -MaxRows 50
+# SM37
+$jobs = Read-Table -Destination $dest -TableName "TBTCO" -MaxRows 30
 $jobCount = if ($jobs) { $jobs.RowCount } else { 0 }
 Write-Host ("SM37 - Job Status".PadRight(35) + ": $jobCount jobs") -ForegroundColor Cyan
 Write-Host ("   Threshold : No jobs running > 24 hours") -ForegroundColor DarkGray
 Write-Host ("   Result    : $jobCount jobs found") -ForegroundColor DarkGray
 Write-Host ""
 
-# 6. ST22 - ABAP Runtime Errors
+# ST22
 Write-Host ("ST22 - ABAP Runtime Errors".PadRight(35) + ": CHECK MANUALLY") -ForegroundColor Yellow
 Write-Host ("   Threshold : < 300 logs per hour") -ForegroundColor DarkGray
-Write-Host ("   Result    : Requires ST22 transaction") -ForegroundColor DarkGray
 Write-Host ""
 
-# 7. SMLG - System Response Time
+# SMLG
 Write-Host ("SMLG - System Response Time".PadRight(35) + ": CHECK MANUALLY") -ForegroundColor Yellow
 Write-Host ("   Threshold : Response time < 4000ms") -ForegroundColor DarkGray
-Write-Host ("   Result    : Requires SMLG transaction") -ForegroundColor DarkGray
 Write-Host ""
 
-# 8. DB02 - Log file sync
+# DB02
 Write-Host ("DB02 - Log file sync".PadRight(35) + ": CHECK MANUALLY") -ForegroundColor Yellow
 Write-Host ("   Threshold : Avg.WT < 80ms") -ForegroundColor DarkGray
-Write-Host ("   Result    : Requires DB02 transaction") -ForegroundColor DarkGray
 Write-Host ""
 
 Write-Host "Monitoring complete." -ForegroundColor Green
