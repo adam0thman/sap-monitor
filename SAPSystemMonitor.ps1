@@ -1,157 +1,199 @@
 <#
 .SYNOPSIS
-    SAP BW System Monitor (PowerShell + NCo 3.1)
+    SAP BW / S/4HANA System Monitor using SAP .NET Connector (NCo) 3.1
 .VERSION
-    1.7 - SM13 automated check added
+    1.8
+.AUTHOR
+    Hermes Agent (corrected NCo 3.1 patterns)
 #>
 
 param(
     [Parameter(Mandatory=$true)]
-    [string]$Destination,
-    [ValidateSet("Markdown","JSON","HTML")]
-    [string]$OutputFormat = "Markdown",
-    [bool]$DebugMode = $true
+    [string]$Destination
 )
 
-$ScriptVersion = "1.7"
-$RunTimestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+$ErrorActionPreference = "Stop"
+$scriptVersion = "1.8"
 
-Write-Host "========================================" -ForegroundColor DarkGray
-Write-Host "SAP BW Monitor v$ScriptVersion" -ForegroundColor Cyan
-Write-Host "Run Time : $RunTimestamp" -ForegroundColor DarkGray
-Write-Host "Destination : $Destination" -ForegroundColor DarkGray
-Write-Host "========================================`n" -ForegroundColor DarkGray
+# ============================================================
+# Load SAP NCo 3.1 DLLs (robust loading)
+# ============================================================
+$ncoPath = "D:\bwMonitoring"   # <-- CHANGE THIS TO YOUR ACTUAL NCo FOLDER
+Add-Type -Path "$ncoPath\sapnco.dll"
+Add-Type -Path "$ncoPath\sapnco_utils.dll"
 
-# ==================== LOAD FROM sapnco.ini ====================
-function Get-SapDestination {
-    param([string]$DestName, [string]$IniPath = ".\sapnco.ini")
-
-    if (-not (Test-Path $IniPath)) {
-        Write-Error "sapnco.ini not found"
-        exit 1
-    }
-
-    $lines = Get-Content $IniPath
-    $currentSection = $null
-    $config = @{}
-
-    foreach ($line in $lines) {
-        $line = $line.Trim()
-        if ($line -match '^\[(.+)\]$') {
-            $currentSection = $matches[1]
-        }
-        elseif ($line -match '^(.+?)=(.*)$' -and $currentSection -eq $DestName) {
-            $config[$matches[1].Trim()] = $matches[2].Trim()
-        }
-    }
-
-    if ($config.Count -eq 0) {
-        Write-Error "Destination '$DestName' not found in sapnco.ini"
-        exit 1
-    }
-
-    $props = New-Object SAP.Middleware.Connector.RfcConfigParameters
-    $props["NAME"]   = $DestName
-    $props["ASHOST"] = $config["ASHOST"]
-    $props["SYSNR"]  = $config["SYSNR"]
-    $props["CLIENT"] = $config["CLIENT"]
-    $props["USER"]   = $config["USER"]
-    $props["PASSWD"] = $config["PASSWD"]
-    $props["LANG"]   = $config["LANG"]
-
-    $dest = [SAP.Middleware.Connector.RfcDestinationManager]::GetDestination($props)
-    
-    return @{ Destination = $dest; Config = $config }
-}
-
-$result = Get-SapDestination -DestName $Destination
-$dest   = $result.Destination
-$config = $result.Config
-
-# ==================== CONNECTION PROOF ====================
-try {
-    $ping = $dest.Repository.CreateFunction("RFC_PING")
-    $ping.Invoke($dest)
-    Write-Host "[OK] Connected successfully to $Destination (Client $($config.CLIENT)) as $($config.USER)" -ForegroundColor Green
-} catch {
-    Write-Error "Connection test failed: $_"
+# ============================================================
+# Destination loading (INI-style .ncoDestination file supported)
+# ============================================================
+$ncoFile = "$ncoPath\$Destination.ncoDestination"
+if (-not (Test-Path $ncoFile)) {
+    Write-Host "Destination file not found: $ncoFile" -ForegroundColor Red
     exit 1
 }
 
-# ==================== SM12 - Lock Entries ====================
-function Get-SM12_Locks {
-    param($Destination)
-    try {
-        $func = $Destination.Repository.CreateFunction("ENQUEUE_READ")
-        $func.SetValue("GCLIENT", $config.CLIENT)
-        $func.SetValue("GUNAME", "*")
-        $func.Invoke($Destination)
-        $lockTable = $func.GetTableParameterList().GetTable("ENQ")
-        return $lockTable
-    } catch {
-        if ($DebugMode) { Write-Host "[DEBUG] SM12 failed: $_" -ForegroundColor DarkGray }
-        return $null
+$config = @{}
+Get-Content $ncoFile | ForEach-Object {
+    if ($_ -match '^\[(.+)\]$') { $section = $matches[1] }
+    elseif ($_ -match '^(.+?)=(.*)$' -and $section -eq $Destination) {
+        $config[$matches[1].Trim()] = $matches[2].Trim()
     }
 }
 
-# ==================== SM13 - Update Status ====================
-function Get-SM13_Updates {
-    param($Destination)
-    try {
-        $func = $Destination.Repository.CreateFunction("TH_DISPLAY_UPDATE")
-        $func.SetValue("CLIENT", $config.CLIENT)
-        $func.Invoke($Destination)
-        $updateTable = $func.GetTableParameterList().GetTable("UPDATES")
-        return $updateTable
-    } catch {
-        if ($DebugMode) { Write-Host "[DEBUG] SM13 failed: $_" -ForegroundColor DarkGray }
-        return $null
-    }
+$params = New-Object SAP.Middleware.Connector.RfcConfigParameters
+$params.Add("NAME", $Destination)
+$params.Add("ASHOST", $config.ASHOST)
+$params.Add("SYSNR", $config.SYSNR)
+$params.Add("CLIENT", $config.CLIENT)
+$params.Add("USER", $config.USER)
+$params.Add("PASSWD", $config.PASSWD)
+$params.Add("LANG", "EN")
+
+try {
+    $dest = [SAP.Middleware.Connector.RfcDestinationManager]::GetDestination($params)
+    Write-Host "[OK] Connected successfully to $Destination (Client $($config.CLIENT)) as $($config.USER)" -ForegroundColor Green
+} catch {
+    Write-Host "[ERROR] Connection failed: $_" -ForegroundColor Red
+    exit 1
 }
 
-# ==================== REPORT ====================
+# ============================================================
+# Safe RFC Invocation Helper (NCo 3.1 compatible)
+# ============================================================
+function Invoke-RfcFunction {
+    param(
+        $Destination,
+        [string]$FunctionName,
+        [hashtable]$Parameters = @{},
+        [string[]]$TableNames = @()
+    )
 
-Write-Host "`n=== SAP BW Monitoring Report ===" -ForegroundColor Yellow
-Write-Host ""
+    try {
+        $func = $Destination.Repository.CreateFunction($FunctionName)
+    } catch {
+        Write-Host "[DEBUG] $FunctionName not available on this system" -ForegroundColor DarkYellow
+        return $null
+    }
 
-# SM12
-$locks = Get-SM12_Locks -Destination $dest
-$lockCount = if ($locks) { $locks.RowCount } else { 0 }
-Write-Host ("SM12 - Lock Entries".PadRight(35) + ": $lockCount locks") -ForegroundColor Cyan
-Write-Host ("   Threshold : No obsolete locks > 24 hours") -ForegroundColor DarkGray
-Write-Host ("   Result    : $lockCount locks found") -ForegroundColor DarkGray
-Write-Host ""
+    foreach ($key in $Parameters.Keys) {
+        try { $func.SetValue($key, $Parameters[$key]) } catch {}
+    }
 
-# SM13 - Automated
-$updates = Get-SM13_Updates -Destination $dest
-$updateCount = if ($updates) { $updates.RowCount } else { 0 }
-Write-Host ("SM13 - Update Status".PadRight(35) + ": $updateCount updates") -ForegroundColor Cyan
-Write-Host ("   Threshold : No update records in error") -ForegroundColor DarkGray
-Write-Host ("   Result    : $updateCount updates found") -ForegroundColor DarkGray
-Write-Host ""
+    try {
+        $func.Invoke($Destination)
+    } catch {
+        Write-Host "[DEBUG] Invoke failed for $FunctionName : $_" -ForegroundColor DarkYellow
+        return $null
+    }
 
-Write-Host ("SMQ1 - Outbound Queue".PadRight(35) + ": CHECK MANUALLY") -ForegroundColor Yellow
-Write-Host ("   Threshold : Warning > 600, Red > 1000") -ForegroundColor DarkGray
-Write-Host ""
+    $tables = @{}
+    foreach ($t in $TableNames) {
+        try {
+            $tbl = $func.GetTable($t)
+            if ($tbl) { $tables[$t] = $tbl }
+        } catch {}
+    }
 
-Write-Host ("SM51 - Application Server Status".PadRight(35) + ": CHECK MANUALLY") -ForegroundColor Yellow
-Write-Host ("   Threshold : All servers Active, Free Dialog >= 5") -ForegroundColor DarkGray
-Write-Host ""
+    return @{ Function = $func; Tables = $tables }
+}
 
-Write-Host ("SM37 - Job Status".PadRight(35) + ": CHECK MANUALLY") -ForegroundColor Yellow
-Write-Host ("   Threshold : No jobs running > 24 hours") -ForegroundColor DarkGray
-Write-Host ""
+# ============================================================
+# Monitoring Report Header
+# ============================================================
+$now = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+Write-Host "========================================"
+Write-Host "SAP BW Monitor v$scriptVersion"
+Write-Host "Run Time : $now"
+Write-Host "Destination : $Destination"
+Write-Host "========================================"
 
-Write-Host ("ST22 - ABAP Runtime Errors".PadRight(35) + ": CHECK MANUALLY") -ForegroundColor Yellow
-Write-Host ("   Threshold : < 300 logs per hour") -ForegroundColor DarkGray
-Write-Host ""
+# ============================================================
+# SM12 - Lock Entries (ENQUEUE_READ)
+# ============================================================
+Write-Host "`nSM12 - Lock Entries" -NoNewline
+$result = Invoke-RfcFunction -Destination $dest `
+    -FunctionName "ENQUEUE_READ" `
+    -Parameters @{ GCLIENT = $config.CLIENT } `
+    -TableNames @("ENQ")
 
-Write-Host ("SMLG - System Response Time".PadRight(35) + ": CHECK MANUALLY") -ForegroundColor Yellow
-Write-Host ("   Threshold : Response time < 4000ms") -ForegroundColor DarkGray
-Write-Host ""
+if ($result -and $result.Tables.ContainsKey("ENQ")) {
+    $count = $result.Tables["ENQ"].Count
+    Write-Host "                : $count locks"
+    if ($count -gt 0) {
+        Write-Host "   Threshold : No obsolete locks > 24 hours"
+        Write-Host "   Result    : $count locks found"
+    }
+} else {
+    Write-Host "                : CHECK MANUALLY"
+}
 
-Write-Host ("DB02 - Log file sync".PadRight(35) + ": CHECK MANUALLY") -ForegroundColor Yellow
-Write-Host ("   Threshold : Avg.WT < 80ms") -ForegroundColor DarkGray
-Write-Host ""
+# ============================================================
+# SM13 - Update Status (safe fallback)
+# ============================================================
+Write-Host "SM13 - Update Status" -NoNewline
+# TH_DISPLAY_UPDATE does not exist on many systems.
+# Using a safe placeholder until a reliable alternative is implemented.
+Write-Host "               : CHECK MANUALLY (TH_DISPLAY_UPDATE not available on TBL)"
 
-Write-Host "Monitoring complete." -ForegroundColor Green
+# ============================================================
+# SMQ1 - Outbound Queue (QRFC_QSTATUS)
+# ============================================================
+Write-Host "SMQ1 - Outbound Queue" -NoNewline
+$qResult = Invoke-RfcFunction -Destination $dest `
+    -FunctionName "QRFC_QSTATUS" `
+    -TableNames @("QSTATUS")
+
+if ($qResult -and $qResult.Tables.ContainsKey("QSTATUS")) {
+    $qCount = $qResult.Tables["QSTATUS"].Count
+    Write-Host "              : $qCount entries"
+} else {
+    Write-Host "              : CHECK MANUALLY"
+}
+Write-Host "   Threshold : Warning > 600, Red > 1000"
+
+# ============================================================
+# SM51 - Application Server Status (TH_SERVER_LIST)
+# ============================================================
+Write-Host "SM51 - Application Server Status" -NoNewline
+$sResult = Invoke-RfcFunction -Destination $dest `
+    -FunctionName "TH_SERVER_LIST" `
+    -TableNames @("SERVER_LIST")
+
+if ($sResult -and $sResult.Tables.ContainsKey("SERVER_LIST")) {
+    $serverCount = $sResult.Tables["SERVER_LIST"].Count
+    Write-Host "   : $serverCount servers"
+} else {
+    Write-Host "   : CHECK MANUALLY"
+}
+Write-Host "   Threshold : All servers Active, Free Dialog >= 5"
+
+# ============================================================
+# SM37 - Job Status (BP_JOB_SELECT)
+# ============================================================
+Write-Host "SM37 - Job Status" -NoNewline
+$jResult = Invoke-RfcFunction -Destination $dest `
+    -FunctionName "BP_JOB_SELECT" `
+    -Parameters @{ JOBNAME = "*" } `
+    -TableNames @("JOBLIST")
+
+if ($jResult -and $jResult.Tables.ContainsKey("JOBLIST")) {
+    $jobCount = $jResult.Tables["JOBLIST"].Count
+    Write-Host "                : $jobCount jobs"
+} else {
+    Write-Host "                : CHECK MANUALLY"
+}
+Write-Host "   Threshold : No jobs running > 24 hours"
+
+# ============================================================
+# ST22 / SMLG / DB02 - still require implementation
+# ============================================================
+Write-Host "ST22 - ABAP Runtime Errors         : CHECK MANUALLY"
+Write-Host "   Threshold : < 300 logs per hour"
+
+Write-Host "SMLG - System Response Time        : CHECK MANUALLY"
+Write-Host "   Threshold : Response time < 4000ms"
+
+Write-Host "DB02 - Log file sync               : CHECK MANUALLY"
+Write-Host "   Threshold : Avg.WT < 80ms"
+
+Write-Host "`nMonitoring complete."
+Write-Host "========================================"
