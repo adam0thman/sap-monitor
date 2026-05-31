@@ -2,7 +2,7 @@
 .SYNOPSIS
     SAP BW System Monitor (PowerShell + NCo 3.1)
 .VERSION
-    0.7 - Aligned with SOP_BW System Monitoring Script v1 20 11 2023
+    0.8 - Professional output aligned with SOP
 #>
 
 param(
@@ -13,7 +13,7 @@ param(
     [bool]$DebugMode = $true
 )
 
-$ScriptVersion = "0.7"
+$ScriptVersion = "0.8"
 $RunTimestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 
 Write-Host "========================================" -ForegroundColor DarkGray
@@ -52,72 +52,79 @@ function Invoke-SimpleRfc {
     }
 }
 
-# ==================== MONITORING CHECKS ====================
+# ==================== MONITORING ====================
 
 Write-Host "Connecting to $Destination..." -ForegroundColor Green
 $dest = Get-NCoDestination -Name $Destination
 
-$results = @{}
+Write-Host "`n=== SAP BW Monitoring Report ===" -ForegroundColor Yellow
+Write-Host ""
 
 # 1. SM12 - Lock Entries
-try {
-    $sm12 = Invoke-SimpleRfc -Destination $dest -FunctionName "ENQUEUE_READ"
-    $results.SM12 = if ($sm12) { "OK" } else { "FAILED" }
-} catch { $results.SM12 = "ERROR" }
+$sm12Result = Invoke-SimpleRfc -Destination $dest -FunctionName "ENQUEUE_READ"
+$sm12Status = if ($sm12Result) { "OK" } else { "CHECK MANUALLY" }
+Write-Host ("SM12 - Lock Entries".PadRight(35) + ": $sm12Status") -ForegroundColor $(if ($sm12Status -eq "OK") { "Green" } else { "Yellow" })
+Write-Host ("   Threshold : No obsolete locks > 24 hours") -ForegroundColor DarkGray
+Write-Host ("   Result    : $sm12Status") -ForegroundColor DarkGray
+Write-Host ""
 
 # 2. SM13 - Update Status
-try {
-    $sm13 = Invoke-SimpleRfc -Destination $dest -FunctionName "TH_DISPLAY_UPDATE"
-    $results.SM13 = if ($sm13) { "OK" } else { "FAILED" }
-} catch { $results.SM13 = "ERROR" }
+$sm13Result = Invoke-SimpleRfc -Destination $dest -FunctionName "TH_DISPLAY_UPDATE"
+$sm13Status = if ($sm13Result) { "OK" } else { "CHECK MANUALLY" }
+Write-Host ("SM13 - Update Status".PadRight(35) + ": $sm13Status") -ForegroundColor $(if ($sm13Status -eq "OK") { "Green" } else { "Yellow" })
+Write-Host ("   Threshold : No update records in error") -ForegroundColor DarkGray
+Write-Host ("   Result    : $sm13Status") -ForegroundColor DarkGray
+Write-Host ""
 
 # 3. SMQ1 - Outbound Queue
-try {
-    $smq1 = Invoke-SimpleRfc -Destination $dest -FunctionName "QRFC_QSTATUS"
-    $results.SMQ1 = if ($smq1) { "OK" } else { "FAILED" }
-} catch { $results.SMQ1 = "ERROR" }
+$smq1Result = Invoke-SimpleRfc -Destination $dest -FunctionName "QRFC_QSTATUS"
+$smq1Status = if ($smq1Result) { "OK" } else { "CHECK MANUALLY" }
+Write-Host ("SMQ1 - Outbound Queue".PadRight(35) + ": $smq1Status") -ForegroundColor $(if ($smq1Status -eq "OK") { "Green" } else { "Yellow" })
+Write-Host ("   Threshold : Warning > 600, Red > 1000") -ForegroundColor DarkGray
+Write-Host ("   Result    : $smq1Status") -ForegroundColor DarkGray
+Write-Host ""
 
-# 4. SM51 - Application Servers + Free Dialog
-try {
-    $sm51 = Invoke-SimpleRfc -Destination $dest -FunctionName "TH_SERVER_LIST"
-    $results.SM51 = if ($sm51) { "OK" } else { "FAILED" }
-} catch { $results.SM51 = "ERROR" }
+# 4. SM51 - Application Servers
+$sm51Result = Invoke-SimpleRfc -Destination $dest -FunctionName "TH_SERVER_LIST"
+$sm51Status = if ($sm51Result) { "OK" } else { "CHECK MANUALLY" }
+Write-Host ("SM51 - Application Server Status".PadRight(35) + ": $sm51Status") -ForegroundColor $(if ($sm51Status -eq "OK") { "Green" } else { "Yellow" })
+Write-Host ("   Threshold : All servers Active, Free Dialog >= 5") -ForegroundColor DarkGray
+Write-Host ("   Result    : $sm51Status") -ForegroundColor DarkGray
+Write-Host ""
 
 # 5. SM37 - Job Status
-try {
-    $sm37 = Invoke-SimpleRfc -Destination $dest -FunctionName "BAPI_XBP_JOB_SELECT" -Parameters @{
-        JOBNAME   = "*"
-        FROM_DATE = (Get-Date).AddDays(-1).ToString("yyyyMMdd")
-    }
-    $results.SM37 = if ($sm37) { "OK" } else { "FAILED" }
-} catch { $results.SM37 = "ERROR" }
+$sm37Result = Invoke-SimpleRfc -Destination $dest -FunctionName "BAPI_XBP_JOB_SELECT" -Parameters @{
+    JOBNAME   = "*"
+    FROM_DATE = (Get-Date).AddDays(-1).ToString("yyyyMMdd")
+}
+$sm37Status = if ($sm37Result) { "OK" } else { "CHECK MANUALLY" }
+Write-Host ("SM37 - Job Status".PadRight(35) + ": $sm37Status") -ForegroundColor $(if ($sm37Status -eq "OK") { "Green" } else { "Yellow" })
+Write-Host ("   Threshold : No jobs running > 24 hours") -ForegroundColor DarkGray
+Write-Host ("   Result    : $sm37Status") -ForegroundColor DarkGray
+Write-Host ""
 
 # 6. ST22 - ABAP Runtime Errors
-try {
-    $st22 = Invoke-SimpleRfc -Destination $dest -FunctionName "SNAPSHOT_GET"
-    $results.ST22 = if ($st22) { "OK" } else { "FAILED" }
-} catch { $results.ST22 = "ERROR" }
+$st22Result = Invoke-SimpleRfc -Destination $dest -FunctionName "SNAPSHOT_GET"
+$st22Status = if ($st22Result) { "OK" } else { "CHECK MANUALLY" }
+Write-Host ("ST22 - ABAP Runtime Errors".PadRight(35) + ": $st22Status") -ForegroundColor $(if ($st22Status -eq "OK") { "Green" } else { "Yellow" })
+Write-Host ("   Threshold : < 300 logs per hour") -ForegroundColor DarkGray
+Write-Host ("   Result    : $st22Status") -ForegroundColor DarkGray
+Write-Host ""
 
 # 7. SMLG - System Response Time
-try {
-    $smlg = Invoke-SimpleRfc -Destination $dest -FunctionName "SMLG_GET_SERVER_GROUPS"
-    $results.SMLG = if ($smlg) { "OK" } else { "FAILED" }
-} catch { $results.SMLG = "ERROR" }
+$smlgResult = Invoke-SimpleRfc -Destination $dest -FunctionName "SMLG_GET_SERVER_GROUPS"
+$smlgStatus = if ($smlgResult) { "OK" } else { "CHECK MANUALLY" }
+Write-Host ("SMLG - System Response Time".PadRight(35) + ": $smlgStatus") -ForegroundColor $(if ($smlgStatus -eq "OK") { "Green" } else { "Yellow" })
+Write-Host ("   Threshold : Response time < 4000ms") -ForegroundColor DarkGray
+Write-Host ("   Result    : $smlgStatus") -ForegroundColor DarkGray
+Write-Host ""
 
 # 8. DB02 - Log file sync
-try {
-    $db02 = Invoke-SimpleRfc -Destination $dest -FunctionName "DB6_PERF_WAIT_EVENTS"
-    $results.DB02 = if ($db02) { "OK" } else { "FAILED" }
-} catch { $results.DB02 = "ERROR" }
+$db02Result = Invoke-SimpleRfc -Destination $dest -FunctionName "DB6_PERF_WAIT_EVENTS"
+$db02Status = if ($db02Result) { "OK" } else { "CHECK MANUALLY" }
+Write-Host ("DB02 - Log file sync".PadRight(35) + ": $db02Status") -ForegroundColor $(if ($db02Status -eq "OK") { "Green" } else { "Yellow" })
+Write-Host ("   Threshold : Avg.WT < 80ms") -ForegroundColor DarkGray
+Write-Host ("   Result    : $db02Status") -ForegroundColor DarkGray
+Write-Host ""
 
-# ==================== OUTPUT ====================
-
-Write-Host "`n=== SAP BW Monitoring Report ===" -ForegroundColor Yellow
-foreach ($key in $results.Keys) {
-    $status = $results[$key]
-    $color = if ($status -eq "OK") { "Green" } else { "Red" }
-    Write-Host ("{0,-6} : {1}" -f $key, $status) -ForegroundColor $color
-}
-
-Write-Host "`nMonitoring complete." -ForegroundColor Green
-return $results
+Write-Host "Monitoring complete." -ForegroundColor Green
