@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    SAP System Monitor using NCo 3.1 (PowerShell) - RFC_READ_TABLE based
+    SAP System Monitor using NCo 3.1 (PowerShell)
 #>
 
 param(
@@ -32,22 +32,29 @@ function Read-Table {
     $func.SetValue("QUERY_TABLE", $Table)
     $func.SetValue("DELIMITER", "|")
     
+    # Add fields
     if ($Fields) {
-        $fieldList = $func.GetTableParameterList().GetTable("FIELDS")
+        $tables = $func.GetTableParameterList()
+        $fieldTable = $tables.GetTable("FIELDS")
         foreach ($f in $Fields) {
-            $row = $fieldList.Append()
+            $row = $fieldTable.Append()
             $row.SetValue("FIELDNAME", $f)
         }
     }
     
+    # Add where clause
     if ($Where) {
-        $opt = $func.GetTableParameterList().GetTable("OPTIONS")
-        $row = $opt.Append()
+        $tables = $func.GetTableParameterList()
+        $optTable = $tables.GetTable("OPTIONS")
+        $row = $optTable.Append()
         $row.SetValue("TEXT", $Where)
     }
     
     $func.Invoke($Destination)
-    return $func.GetTableParameterList().GetTable("DATA")
+    
+    # Get result table
+    $tables = $func.GetTableParameterList()
+    return $tables.GetTable("DATA")
 }
 
 # ==================== MONITORING ====================
