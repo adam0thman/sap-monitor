@@ -2,7 +2,7 @@
 .SYNOPSIS
     SAP BW System Monitor (PowerShell + NCo 3.1)
 .VERSION
-    1.6 - SM12 automated check added
+    1.7 - SM13 automated check added
 #>
 
 param(
@@ -13,7 +13,7 @@ param(
     [bool]$DebugMode = $true
 )
 
-$ScriptVersion = "1.6"
+$ScriptVersion = "1.7"
 $RunTimestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 
 Write-Host "========================================" -ForegroundColor DarkGray
@@ -81,18 +81,30 @@ try {
 # ==================== SM12 - Lock Entries ====================
 function Get-SM12_Locks {
     param($Destination)
-    
     try {
         $func = $Destination.Repository.CreateFunction("ENQUEUE_READ")
         $func.SetValue("GCLIENT", $config.CLIENT)
         $func.SetValue("GUNAME", "*")
-        
         $func.Invoke($Destination)
-        
         $lockTable = $func.GetTableParameterList().GetTable("ENQ")
         return $lockTable
     } catch {
-        if ($DebugMode) { Write-Host "[DEBUG] SM12 (ENQUEUE_READ) failed: $_" -ForegroundColor DarkGray }
+        if ($DebugMode) { Write-Host "[DEBUG] SM12 failed: $_" -ForegroundColor DarkGray }
+        return $null
+    }
+}
+
+# ==================== SM13 - Update Status ====================
+function Get-SM13_Updates {
+    param($Destination)
+    try {
+        $func = $Destination.Repository.CreateFunction("TH_DISPLAY_UPDATE")
+        $func.SetValue("CLIENT", $config.CLIENT)
+        $func.Invoke($Destination)
+        $updateTable = $func.GetTableParameterList().GetTable("UPDATES")
+        return $updateTable
+    } catch {
+        if ($DebugMode) { Write-Host "[DEBUG] SM13 failed: $_" -ForegroundColor DarkGray }
         return $null
     }
 }
@@ -102,17 +114,20 @@ function Get-SM12_Locks {
 Write-Host "`n=== SAP BW Monitoring Report ===" -ForegroundColor Yellow
 Write-Host ""
 
-# SM12 - Automated
+# SM12
 $locks = Get-SM12_Locks -Destination $dest
 $lockCount = if ($locks) { $locks.RowCount } else { 0 }
-
 Write-Host ("SM12 - Lock Entries".PadRight(35) + ": $lockCount locks") -ForegroundColor Cyan
 Write-Host ("   Threshold : No obsolete locks > 24 hours") -ForegroundColor DarkGray
 Write-Host ("   Result    : $lockCount locks found") -ForegroundColor DarkGray
 Write-Host ""
 
-Write-Host ("SM13 - Update Status".PadRight(35) + ": CHECK MANUALLY") -ForegroundColor Yellow
+# SM13 - Automated
+$updates = Get-SM13_Updates -Destination $dest
+$updateCount = if ($updates) { $updates.RowCount } else { 0 }
+Write-Host ("SM13 - Update Status".PadRight(35) + ": $updateCount updates") -ForegroundColor Cyan
 Write-Host ("   Threshold : No update records in error") -ForegroundColor DarkGray
+Write-Host ("   Result    : $updateCount updates found") -ForegroundColor DarkGray
 Write-Host ""
 
 Write-Host ("SMQ1 - Outbound Queue".PadRight(35) + ": CHECK MANUALLY") -ForegroundColor Yellow
@@ -123,11 +138,8 @@ Write-Host ("SM51 - Application Server Status".PadRight(35) + ": CHECK MANUALLY"
 Write-Host ("   Threshold : All servers Active, Free Dialog >= 5") -ForegroundColor DarkGray
 Write-Host ""
 
-$jobs = Read-Table -Destination $dest -TableName "TBTCO" -MaxRows 15
-$jobCount = if ($jobs) { $jobs.RowCount } else { 0 }
-Write-Host ("SM37 - Job Status".PadRight(35) + ": $jobCount jobs") -ForegroundColor Cyan
+Write-Host ("SM37 - Job Status".PadRight(35) + ": CHECK MANUALLY") -ForegroundColor Yellow
 Write-Host ("   Threshold : No jobs running > 24 hours") -ForegroundColor DarkGray
-Write-Host ("   Result    : $jobCount jobs found") -ForegroundColor DarkGray
 Write-Host ""
 
 Write-Host ("ST22 - ABAP Runtime Errors".PadRight(35) + ": CHECK MANUALLY") -ForegroundColor Yellow
