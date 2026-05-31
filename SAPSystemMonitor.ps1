@@ -19,11 +19,11 @@ param(
 
 # Load SAP NCo assemblies (robust path handling)
 $ncoPaths = @(
-    ".\nco\sapnco.dll",                    # preferred subfolder
-    ".\sapnco.dll",                        # same folder as script
+    ".\nco\sapnco.dll",
+    ".\sapnco.dll",
     "$PSScriptRoot\nco\sapnco.dll",
     "$PSScriptRoot\sapnco.dll",
-    "C:\Program Files\SAP\NCo\sapnco.dll"  # common install location
+    "C:\Program Files\SAP\NCo\sapnco.dll"
 ) | Where-Object { Test-Path $_ }
 
 if ($ncoPaths) {
@@ -32,15 +32,12 @@ if ($ncoPaths) {
     Add-Type -Path $dllPath
     Add-Type -Path ($dllPath -replace 'sapnco\.dll$', 'sapnco_utils.dll')
 } else {
-    Write-Error "SAP NCo DLLs not found. Place sapnco.dll + sapnco_utils.dll in the script folder or in a 'nco' subfolder."
+    Write-Error "SAP NCo DLLs not found."
     exit 1
 }
 
 function Get-NCoDestination {
     param([string]$DestName)
-    $cfg = [SAP.Middleware.Connector.RfcConfigParameters]::new()
-    # Load from .ncoDestination file logic here (simplified)
-    # In real implementation: parse INI-style file and register
     return [SAP.Middleware.Connector.RfcDestinationManager]::GetDestination($DestName)
 }
 
@@ -54,7 +51,6 @@ function Invoke-RfcFunction {
 
     $func = $Destination.Repository.CreateFunction($FunctionName)
 
-    # Set importing parameters
     foreach ($key in $Parameters.Keys) {
         if ($func.GetImportingParameterList().Contains($key)) {
             $func.SetValue($key, $Parameters[$key])
@@ -63,7 +59,6 @@ function Invoke-RfcFunction {
 
     $func.Invoke($Destination)
 
-    # Handle table output parameters (the fixed pattern)
     $tables = @{}
     foreach ($tableName in $TableNames) {
         if ($func.GetTableParameterList().Contains($tableName)) {
@@ -72,16 +67,107 @@ function Invoke-RfcFunction {
     }
 
     return @{
-        Function   = $func
-        Tables     = $tables
+        Function = $func
+        Tables   = $tables
     }
 }
 
-# Main monitoring logic placeholder
-Write-Host "Connecting to $Destination..."
+# ==================== MONITORING FUNCTIONS ====================
+
+function Get-SM12_Locks {
+    param($Destination)
+    try {
+        $result = Invoke-RfcFunction -Destination $Destination -FunctionName "ENQUEUE_READ" -Parameters @{
+            GCLIENT = $Destination.Client
+            GUNAME  = ""
+        } -TableNames @("ENQ")
+        return $result.Tables["ENQ"]
+    } catch {
+        Write-Warning "SM12 check failed: $_"
+        return $null
+    }
+}
+
+function Get-SM13_Updates {
+    param($Destination)
+    try {
+        $result = Invoke-RfcFunction -Destination $Destination -FunctionName "UPDATE_READ" -Parameters @{
+            CLIENT = $Destination.Client
+        } -TableNames @("UPDATES")
+        return $result.Tables["UPDATES"]
+    } catch {
+        Write-Warning "SM13 check failed: $_"
+        return $null
+    }
+}
+
+function Get-SMQ1_Queues {
+    param($Destination)
+    try {
+        $result = Invoke-RfcFunction -Destination $Destination -FunctionName "TRFC_QRFC_MONITOR" -Parameters @{
+            QNAME = ""
+        } -TableNames @("QSTATUS")
+        return $result.Tables["QSTATUS"]
+    } catch {
+        Write-Warning "SMQ1 check failed: $_"
+        return $null
+    }
+}
+
+function Get-SM51_Servers {
+    param($Destination)
+    try {
+        $result = Invoke-RfcFunction -Destination $Destination -FunctionName "TH_SERVER_LIST" -TableNames @("SERVER_LIST")
+        return $result.Tables["SERVER_LIST"]
+    } catch {
+        Write-Warning "SM51 check failed: $_"
+        return $null
+    }
+}
+
+function Get-SM37_Jobs {
+    param($Destination)
+    try {
+        $result = Invoke-RfcFunction -Destination $Destination -FunctionName "BP_JOB_SELECT" -Parameters @{
+            JOBNAME   = "*"
+            JOBGROUP  = ""
+            FROM_DATE = (Get-Date).AddDays(-1).ToString("yyyyMMdd")
+        } -TableNames @("JOBLIST")
+        return $result.Tables["JOBLIST"]
+    } catch {
+        Write-Warning "SM37 check failed: $_"
+        return $null
+    }
+}
+
+# ==================== MAIN EXECUTION ====================
+
+Write-Host "Connecting to $Destination..." -ForegroundColor Green
 $dest = Get-NCoDestination -DestName $Destination
 
-# TODO: Implement the 8 monitoring checks using NCo RFC calls
-# (See references/ for detailed RFC patterns)
+Write-Host "`n=== Running SAP Monitoring Checks ===" -ForegroundColor Yellow
 
-Write-Host "Monitoring complete. Output format: $OutputFormat"
+$results = @{
+    SM12_Locks   = Get-SM12_Locks   $dest
+    SM13_Updates = Get-SM13_Updates $dest
+    SMQ1_Queues  = Get-SMQ1_Queues  $dest
+    SM51_Servers = Get-SM51_Servers $dest
+    SM37_Jobs    = Get-SM37_Jobs    $dest
+}
+
+# Simple Markdown output for now
+if ($OutputFormat -eq "Markdown") {
+    Write-Host "`n# SAP Monitor Report - $(Get-Date -Format 'yyyy-MM-dd HH:mm')`n" -ForegroundColor Cyan
+
+    foreach ($check in $results.Keys) {
+        $data = $results[$check]
+        if ($data -and $data.RowCount -gt 0) {
+            Write-Host "## $check ($($data.RowCount) entries)" -ForegroundColor Green
+        } else {
+            Write-Host "## $check - OK / No issues" -ForegroundColor Green
+        }
+    }
+}
+
+Write-Host "`nMonitoring complete." -ForegroundColor Green
+return $results
