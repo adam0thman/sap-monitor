@@ -17,9 +17,24 @@ param(
     [string]$OutputFormat = "Markdown"
 )
 
-# Load NCo assemblies (adjust path as needed)
-Add-Type -Path ".\nco\sapnco.dll"
-Add-Type -Path ".\nco\sapnco_utils.dll"
+# Load SAP NCo assemblies (robust path handling)
+$ncoPaths = @(
+    ".\nco\sapnco.dll",                    # preferred subfolder
+    ".\sapnco.dll",                        # same folder as script
+    "$PSScriptRoot\nco\sapnco.dll",
+    "$PSScriptRoot\sapnco.dll",
+    "C:\Program Files\SAP\NCo\sapnco.dll"  # common install location
+) | Where-Object { Test-Path $_ }
+
+if ($ncoPaths) {
+    $dllPath = $ncoPaths | Select-Object -First 1
+    Write-Host "Loading NCo from: $dllPath" -ForegroundColor Cyan
+    Add-Type -Path $dllPath
+    Add-Type -Path ($dllPath -replace 'sapnco\.dll$', 'sapnco_utils.dll')
+} else {
+    Write-Error "SAP NCo DLLs not found. Place sapnco.dll + sapnco_utils.dll in the script folder or in a 'nco' subfolder."
+    exit 1
+}
 
 function Get-NCoDestination {
     param([string]$DestName)
