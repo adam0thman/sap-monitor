@@ -1,8 +1,8 @@
 <#
 .SYNOPSIS
-    SAP System Monitor using NCo 3.1 (PowerShell)
+    SAP BW System Monitor (PowerShell + NCo 3.1)
 .VERSION
-    0.6 - Ported patterns from Java JCo utilities
+    0.7 - Aligned with SOP_BW System Monitoring Script v1 20 11 2023
 #>
 
 param(
@@ -13,21 +13,19 @@ param(
     [bool]$DebugMode = $true
 )
 
-$ScriptVersion = "0.6"
+$ScriptVersion = "0.7"
 $RunTimestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 
 Write-Host "========================================" -ForegroundColor DarkGray
-Write-Host "SAP Monitor v$ScriptVersion" -ForegroundColor Cyan
+Write-Host "SAP BW Monitor v$ScriptVersion" -ForegroundColor Cyan
 Write-Host "Run Time : $RunTimestamp" -ForegroundColor DarkGray
 Write-Host "Destination : $Destination" -ForegroundColor DarkGray
-Write-Host "Debug Mode : $DebugMode" -ForegroundColor DarkGray
 Write-Host "========================================`n" -ForegroundColor DarkGray
 
 # Load NCo
 $ncoPaths = @(".\sapnco.dll", "$PSScriptRoot\sapnco.dll") | Where-Object { Test-Path $_ }
 if ($ncoPaths) {
     $dll = $ncoPaths | Select-Object -First 1
-    if ($DebugMode) { Write-Host "[DEBUG] Loading NCo from: $dll" -ForegroundColor DarkGray }
     Add-Type -Path $dll
     Add-Type -Path ($dll -replace 'sapnco\.dll$', 'sapnco_utils.dll')
 } else {
@@ -41,14 +39,11 @@ function Get-NCoDestination { param($Name)
 
 function Invoke-SimpleRfc {
     param($Destination, [string]$FunctionName, [hashtable]$Parameters = @{})
-    
     try {
         $func = $Destination.Repository.CreateFunction($FunctionName)
-        
         foreach ($key in $Parameters.Keys) {
             try { $func.SetValue($key, $Parameters[$key]) } catch {}
         }
-        
         $func.Invoke($Destination)
         return $func
     } catch {
@@ -57,46 +52,72 @@ function Invoke-SimpleRfc {
     }
 }
 
-# ==================== MONITORING ====================
+# ==================== MONITORING CHECKS ====================
 
 Write-Host "Connecting to $Destination..." -ForegroundColor Green
 $dest = Get-NCoDestination -Name $Destination
 
-Write-Host "`n=== SAP Monitoring Checks ===" -ForegroundColor Yellow
+$results = @{}
 
-# 1. System Info (from Java version)
+# 1. SM12 - Lock Entries
 try {
-    $sysInfo = Invoke-SimpleRfc -Destination $dest -FunctionName "RFC_SYSTEM_INFO"
-    if ($sysInfo) {
-        Write-Host "System Info: OK" -ForegroundColor Green
-    }
-} catch { Write-Warning "RFC_SYSTEM_INFO failed" }
+    $sm12 = Invoke-SimpleRfc -Destination $dest -FunctionName "ENQUEUE_READ"
+    $results.SM12 = if ($sm12) { "OK" } else { "FAILED" }
+} catch { $results.SM12 = "ERROR" }
 
-# 2. Server List
+# 2. SM13 - Update Status
 try {
-    $servers = Invoke-SimpleRfc -Destination $dest -FunctionName "TH_SERVER_LIST"
-    if ($servers) {
-        Write-Host "SM51 Servers: Available" -ForegroundColor Green
-    }
-} catch { Write-Warning "TH_SERVER_LIST failed" }
+    $sm13 = Invoke-SimpleRfc -Destination $dest -FunctionName "TH_DISPLAY_UPDATE"
+    $results.SM13 = if ($sm13) { "OK" } else { "FAILED" }
+} catch { $results.SM13 = "ERROR" }
 
-# 3. Active Users
+# 3. SMQ1 - Outbound Queue
 try {
-    $users = Invoke-SimpleRfc -Destination $dest -FunctionName "TH_USER_LIST"
-    if ($users) {
-        Write-Host "Active Users: Available" -ForegroundColor Green
-    }
-} catch { Write-Warning "TH_USER_LIST failed" }
+    $smq1 = Invoke-SimpleRfc -Destination $dest -FunctionName "QRFC_QSTATUS"
+    $results.SMQ1 = if ($smq1) { "OK" } else { "FAILED" }
+} catch { $results.SMQ1 = "ERROR" }
 
-# 4. Background Jobs (BAPI)
+# 4. SM51 - Application Servers + Free Dialog
 try {
-    $jobs = Invoke-SimpleRfc -Destination $dest -FunctionName "BAPI_XBP_JOB_SELECT" -Parameters @{
+    $sm51 = Invoke-SimpleRfc -Destination $dest -FunctionName "TH_SERVER_LIST"
+    $results.SM51 = if ($sm51) { "OK" } else { "FAILED" }
+} catch { $results.SM51 = "ERROR" }
+
+# 5. SM37 - Job Status
+try {
+    $sm37 = Invoke-SimpleRfc -Destination $dest -FunctionName "BAPI_XBP_JOB_SELECT" -Parameters @{
         JOBNAME   = "*"
         FROM_DATE = (Get-Date).AddDays(-1).ToString("yyyyMMdd")
     }
-    if ($jobs) {
-        Write-Host "SM37 Jobs: Available" -ForegroundColor Green
-    }
-} catch { Write-Warning "BAPI_XBP_JOB_SELECT failed" }
+    $results.SM37 = if ($sm37) { "OK" } else { "FAILED" }
+} catch { $results.SM37 = "ERROR" }
+
+# 6. ST22 - ABAP Runtime Errors
+try {
+    $st22 = Invoke-SimpleRfc -Destination $dest -FunctionName "SNAPSHOT_GET"
+    $results.ST22 = if ($st22) { "OK" } else { "FAILED" }
+} catch { $results.ST22 = "ERROR" }
+
+# 7. SMLG - System Response Time
+try {
+    $smlg = Invoke-SimpleRfc -Destination $dest -FunctionName "SMLG_GET_SERVER_GROUPS"
+    $results.SMLG = if ($smlg) { "OK" } else { "FAILED" }
+} catch { $results.SMLG = "ERROR" }
+
+# 8. DB02 - Log file sync
+try {
+    $db02 = Invoke-SimpleRfc -Destination $dest -FunctionName "DB6_PERF_WAIT_EVENTS"
+    $results.DB02 = if ($db02) { "OK" } else { "FAILED" }
+} catch { $results.DB02 = "ERROR" }
+
+# ==================== OUTPUT ====================
+
+Write-Host "`n=== SAP BW Monitoring Report ===" -ForegroundColor Yellow
+foreach ($key in $results.Keys) {
+    $status = $results[$key]
+    $color = if ($status -eq "OK") { "Green" } else { "Red" }
+    Write-Host ("{0,-6} : {1}" -f $key, $status) -ForegroundColor $color
+}
 
 Write-Host "`nMonitoring complete." -ForegroundColor Green
+return $results
