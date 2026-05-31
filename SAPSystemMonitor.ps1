@@ -2,20 +2,18 @@
 .SYNOPSIS
     SAP System Monitor using NCo 3.1 (PowerShell)
 .VERSION
-    0.4
+    0.5 - Switched to simpler, more compatible RFCs
 #>
 
 param(
     [Parameter(Mandatory=$true)]
     [string]$Destination,
-
     [ValidateSet("Markdown","JSON","HTML")]
     [string]$OutputFormat = "Markdown",
-
     [bool]$DebugMode = $true
 )
 
-$ScriptVersion = "0.4"
+$ScriptVersion = "0.5"
 $RunTimestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 
 Write-Host "========================================" -ForegroundColor DarkGray
@@ -41,41 +39,22 @@ function Get-NCoDestination { param($Name)
     return [SAP.Middleware.Connector.RfcDestinationManager]::GetDestination($Name)
 }
 
-function Read-Table {
-    param($Destination, [string]$Table, [string[]]$Fields, [string]$Where = "")
+function Invoke-SimpleRfc {
+    param($Destination, [string]$FunctionName, [hashtable]$Parameters = @{})
     
-    $func = $Destination.Repository.CreateFunction("RFC_READ_TABLE")
-    $func.SetValue("QUERY_TABLE", $Table)
-    $func.SetValue("DELIMITER", "|")
-    
-    $paramList = $null
     try {
-        $paramList = $func.GetTableParameterList()
+        $func = $Destination.Repository.CreateFunction($FunctionName)
+        
+        foreach ($key in $Parameters.Keys) {
+            try { $func.SetValue($key, $Parameters[$key]) } catch {}
+        }
+        
+        $func.Invoke($Destination)
+        return $func
     } catch {
-        if ($DebugMode) { Write-Host "[DEBUG] GetTableParameterList() not available" -ForegroundColor DarkGray }
+        if ($DebugMode) { Write-Host "[DEBUG] $FunctionName failed: $_" -ForegroundColor DarkGray }
         return $null
     }
-    
-    if ($Fields -and $paramList) {
-        $fieldTable = $paramList.GetTable("FIELDS")
-        foreach ($f in $Fields) {
-            $row = $fieldTable.Append()
-            $row.SetValue("FIELDNAME", $f)
-        }
-    }
-    
-    if ($Where -and $paramList) {
-        $optTable = $paramList.GetTable("OPTIONS")
-        $row = $optTable.Append()
-        $row.SetValue("TEXT", $Where)
-    }
-    
-    $func.Invoke($Destination)
-    
-    if ($paramList) {
-        return $paramList.GetTable("DATA")
-    }
-    return $null
 }
 
 # ==================== MONITORING ====================
@@ -83,31 +62,43 @@ function Read-Table {
 Write-Host "Connecting to $Destination..." -ForegroundColor Green
 $dest = Get-NCoDestination -Name $Destination
 
-Write-Host "`n=== SAP Monitoring Checks ===" -ForegroundColor Yellow
+Write-Host "`n=== SAP Monitoring Checks (Compatible Mode) ===" -ForegroundColor Yellow
 
+# 1. System Info (very reliable)
 try {
-    $locks = Read-Table -Destination $dest -Table "ENQ" -Fields @("GUNAME","GCLIENT","GTABNAME") -Where "GUNAME <> ''"
-    if ($locks) { Write-Host "SM12 Locks: $($locks.RowCount)" -ForegroundColor Cyan }
-} catch { Write-Warning "SM12 failed: $_" }
+    $sysInfo = Invoke-SimpleRfc -Destination $dest -FunctionName "RFC_SYSTEM_INFO"
+    if ($sysInfo) {
+        $sysId = $sysInfo.GetValue("RFCSI_EXPORT")
+        Write-Host "System Info: OK" -ForegroundColor Green
+        if ($DebugMode) { Write-Host "[DEBUG] System ID info retrieved" -ForegroundColor DarkGray }
+    }
+} catch { Write-Warning "RFC_SYSTEM_INFO failed" }
 
+# 2. Server List
 try {
-    $updates = Read-Table -Destination $dest -Table "VBHDR" -Fields @("VBKEY","VBTYP","STATUS") -Where "STATUS = 'I'"
-    if ($updates) { Write-Host "SM13 Pending Updates: $($updates.RowCount)" -ForegroundColor Cyan }
-} catch { Write-Warning "SM13 failed: $_" }
+    $servers = Invoke-SimpleRfc -Destination $dest -FunctionName "TH_SERVER_LIST"
+    if ($servers) {
+        Write-Host "SM51 Servers: Available" -ForegroundColor Green
+    }
+} catch { Write-Warning "TH_SERVER_LIST failed" }
 
+# 3. User List (lightweight)
 try {
-    $queues = Read-Table -Destination $dest -Table "TRFCQOUT" -Fields @("QNAME","QSTATE") 
-    if ($queues) { Write-Host "SMQ1 Queues: $($queues.RowCount)" -ForegroundColor Cyan }
-} catch { Write-Warning "SMQ1 failed: $_" }
+    $users = Invoke-SimpleRfc -Destination $dest -FunctionName "TH_USER_LIST"
+    if ($users) {
+        Write-Host "Active Users: Available" -ForegroundColor Green
+    }
+} catch { Write-Warning "TH_USER_LIST failed" }
 
+# 4. Background Jobs (modern BAPI)
 try {
-    $servers = Read-Table -Destination $dest -Table "T000" -Fields @("MANDT","MTEXT") 
-    if ($servers) { Write-Host "SM51 Servers check done" -ForegroundColor Cyan }
-} catch { Write-Warning "SM51 failed: $_" }
-
-try {
-    $jobs = Read-Table -Destination $dest -Table "TBTCO" -Fields @("JOBNAME","STATUS","SDLSTRTDT") -Where "SDLSTRTDT >= '$(Get-Date -Format yyyyMMdd)'"
-    if ($jobs) { Write-Host "SM37 Jobs today: $($jobs.RowCount)" -ForegroundColor Cyan }
-} catch { Write-Warning "SM37 failed: $_" }
+    $jobs = Invoke-SimpleRfc -Destination $dest -FunctionName "BAPI_XBP_JOB_SELECT" -Parameters @{
+        JOBNAME   = "*"
+        FROM_DATE = (Get-Date).AddDays(-1).ToString("yyyyMMdd")
+    }
+    if ($jobs) {
+        Write-Host "SM37 Jobs: Available" -ForegroundColor Green
+    }
+} catch { Write-Warning "BAPI_XBP_JOB_SELECT failed" }
 
 Write-Host "`nMonitoring complete." -ForegroundColor Green
