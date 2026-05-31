@@ -51,18 +51,27 @@ function Invoke-RfcFunction {
 
     $func = $Destination.Repository.CreateFunction($FunctionName)
 
+    # Set importing parameters safely (NCo 3.1 compatible)
     foreach ($key in $Parameters.Keys) {
-        if ($func.GetImportingParameterList().Contains($key)) {
+        try {
             $func.SetValue($key, $Parameters[$key])
+        } catch {
+            # ignore missing parameters
         }
     }
 
     $func.Invoke($Destination)
 
+    # Collect requested tables safely
     $tables = @{}
     foreach ($tableName in $TableNames) {
-        if ($func.GetTableParameterList().Contains($tableName)) {
-            $tables[$tableName] = $func.GetTableParameterList().GetTable($tableName)
+        try {
+            $table = $func.GetTable($tableName)
+            if ($table) {
+                $tables[$tableName] = $table
+            }
+        } catch {
+            # table not present
         }
     }
 
@@ -79,7 +88,6 @@ function Get-SM12_Locks {
     try {
         $result = Invoke-RfcFunction -Destination $Destination -FunctionName "ENQUEUE_READ" -Parameters @{
             GCLIENT = $Destination.Client
-            GUNAME  = ""
         } -TableNames @("ENQ")
         return $result.Tables["ENQ"]
     } catch {
@@ -91,7 +99,7 @@ function Get-SM12_Locks {
 function Get-SM13_Updates {
     param($Destination)
     try {
-        $result = Invoke-RfcFunction -Destination $Destination -FunctionName "UPDATE_READ" -Parameters @{
+        $result = Invoke-RfcFunction -Destination $Destination -FunctionName "TH_DISPLAY_UPDATE" -Parameters @{
             CLIENT = $Destination.Client
         } -TableNames @("UPDATES")
         return $result.Tables["UPDATES"]
@@ -104,9 +112,7 @@ function Get-SM13_Updates {
 function Get-SMQ1_Queues {
     param($Destination)
     try {
-        $result = Invoke-RfcFunction -Destination $Destination -FunctionName "TRFC_QRFC_MONITOR" -Parameters @{
-            QNAME = ""
-        } -TableNames @("QSTATUS")
+        $result = Invoke-RfcFunction -Destination $Destination -FunctionName "QRFC_QSTATUS" -TableNames @("QSTATUS")
         return $result.Tables["QSTATUS"]
     } catch {
         Write-Warning "SMQ1 check failed: $_"
@@ -130,7 +136,6 @@ function Get-SM37_Jobs {
     try {
         $result = Invoke-RfcFunction -Destination $Destination -FunctionName "BP_JOB_SELECT" -Parameters @{
             JOBNAME   = "*"
-            JOBGROUP  = ""
             FROM_DATE = (Get-Date).AddDays(-1).ToString("yyyyMMdd")
         } -TableNames @("JOBLIST")
         return $result.Tables["JOBLIST"]
@@ -155,7 +160,7 @@ $results = @{
     SM37_Jobs    = Get-SM37_Jobs    $dest
 }
 
-# Simple Markdown output for now
+# Simple Markdown output
 if ($OutputFormat -eq "Markdown") {
     Write-Host "`n# SAP Monitor Report - $(Get-Date -Format 'yyyy-MM-dd HH:mm')`n" -ForegroundColor Cyan
 
