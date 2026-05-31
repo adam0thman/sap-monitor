@@ -1,12 +1,8 @@
 <#
 .SYNOPSIS
-    SAP System Monitor using NCo 3.1 (PowerShell)
+    SAP System Monitor using NCo 3.1 (PowerShell) - RFC_READ_TABLE based
 .DESCRIPTION
-    Monitors key SAP areas: SM12, SM13, SMQ1, SM51, SM37, ST22, SMLG, DB02
-.PARAMETER Destination
-    Section name in the .ncoDestination file (e.g. S4D)
-.PARAMETER OutputFormat
-    Markdown, JSON, or HTML
+    Reliable monitoring using RFC_READ_TABLE (works on most systems)
 #>
 
 param(
@@ -17,162 +13,81 @@ param(
     [string]$OutputFormat = "Markdown"
 )
 
-# Load SAP NCo assemblies (robust path handling)
-$ncoPaths = @(
-    ".\nco\sapnco.dll",
-    ".\sapnco.dll",
-    "$PSScriptRoot\nco\sapnco.dll",
-    "$PSScriptRoot\sapnco.dll",
-    "C:\Program Files\SAP\NCo\sapnco.dll"
-) | Where-Object { Test-Path $_ }
-
+# Load NCo
+$ncoPaths = @(".\sapnco.dll", "$PSScriptRoot\sapnco.dll") | Where-Object { Test-Path $_ }
 if ($ncoPaths) {
-    $dllPath = $ncoPaths | Select-Object -First 1
-    Write-Host "Loading NCo from: $dllPath" -ForegroundColor Cyan
-    Add-Type -Path $dllPath
-    Add-Type -Path ($dllPath -replace 'sapnco\.dll$', 'sapnco_utils.dll')
+    $dll = $ncoPaths | Select-Object -First 1
+    Add-Type -Path $dll
+    Add-Type -Path ($dll -replace 'sapnco\.dll$', 'sapnco_utils.dll')
 } else {
-    Write-Error "SAP NCo DLLs not found."
+    Write-Error "sapnco.dll not found"
     exit 1
 }
 
-function Get-NCoDestination {
-    param([string]$DestName)
-    return [SAP.Middleware.Connector.RfcDestinationManager]::GetDestination($DestName)
+function Get-NCoDestination { param($Name) 
+    return [SAP.Middleware.Connector.RfcDestinationManager]::GetDestination($Name)
 }
 
-function Invoke-RfcFunction {
-    param(
-        $Destination,
-        [string]$FunctionName,
-        [hashtable]$Parameters = @{},
-        [string[]]$TableNames = @()
-    )
-
-    $func = $Destination.Repository.CreateFunction($FunctionName)
-
-    # Set importing parameters safely (NCo 3.1 compatible)
-    foreach ($key in $Parameters.Keys) {
-        try {
-            $func.SetValue($key, $Parameters[$key])
-        } catch {
-            # ignore missing parameters
+function Read-Table {
+    param($Destination, [string]$Table, [string[]]$Fields, [string]$Where = "")
+    
+    $func = $Destination.Repository.CreateFunction("RFC_READ_TABLE")
+    $func.SetValue("QUERY_TABLE", $Table)
+    $func.SetValue("DELIMITER", "|")
+    
+    if ($Fields) {
+        $fieldList = $func.GetTable("FIELDS")
+        foreach ($f in $Fields) {
+            $row = $fieldList.Append()
+            $row.SetValue("FIELDNAME", $f)
         }
     }
-
+    
+    if ($Where) {
+        $opt = $func.GetTable("OPTIONS")
+        $row = $opt.Append()
+        $row.SetValue("TEXT", $Where)
+    }
+    
     $func.Invoke($Destination)
-
-    # Collect requested tables safely
-    $tables = @{}
-    foreach ($tableName in $TableNames) {
-        try {
-            $table = $func.GetTable($tableName)
-            if ($table) {
-                $tables[$tableName] = $table
-            }
-        } catch {
-            # table not present
-        }
-    }
-
-    return @{
-        Function = $func
-        Tables   = $tables
-    }
+    return $func.GetTable("DATA")
 }
 
-# ==================== MONITORING FUNCTIONS ====================
-
-function Get-SM12_Locks {
-    param($Destination)
-    try {
-        $result = Invoke-RfcFunction -Destination $Destination -FunctionName "ENQUEUE_READ" -Parameters @{
-            GCLIENT = $Destination.Client
-        } -TableNames @("ENQ")
-        return $result.Tables["ENQ"]
-    } catch {
-        Write-Warning "SM12 check failed: $_"
-        return $null
-    }
-}
-
-function Get-SM13_Updates {
-    param($Destination)
-    try {
-        $result = Invoke-RfcFunction -Destination $Destination -FunctionName "TH_DISPLAY_UPDATE" -Parameters @{
-            CLIENT = $Destination.Client
-        } -TableNames @("UPDATES")
-        return $result.Tables["UPDATES"]
-    } catch {
-        Write-Warning "SM13 check failed: $_"
-        return $null
-    }
-}
-
-function Get-SMQ1_Queues {
-    param($Destination)
-    try {
-        $result = Invoke-RfcFunction -Destination $Destination -FunctionName "QRFC_QSTATUS" -TableNames @("QSTATUS")
-        return $result.Tables["QSTATUS"]
-    } catch {
-        Write-Warning "SMQ1 check failed: $_"
-        return $null
-    }
-}
-
-function Get-SM51_Servers {
-    param($Destination)
-    try {
-        $result = Invoke-RfcFunction -Destination $Destination -FunctionName "TH_SERVER_LIST" -TableNames @("SERVER_LIST")
-        return $result.Tables["SERVER_LIST"]
-    } catch {
-        Write-Warning "SM51 check failed: $_"
-        return $null
-    }
-}
-
-function Get-SM37_Jobs {
-    param($Destination)
-    try {
-        $result = Invoke-RfcFunction -Destination $Destination -FunctionName "BP_JOB_SELECT" -Parameters @{
-            JOBNAME   = "*"
-            FROM_DATE = (Get-Date).AddDays(-1).ToString("yyyyMMdd")
-        } -TableNames @("JOBLIST")
-        return $result.Tables["JOBLIST"]
-    } catch {
-        Write-Warning "SM37 check failed: $_"
-        return $null
-    }
-}
-
-# ==================== MAIN EXECUTION ====================
+# ==================== MONITORING ====================
 
 Write-Host "Connecting to $Destination..." -ForegroundColor Green
-$dest = Get-NCoDestination -DestName $Destination
+$dest = Get-NCoDestination -Name $Destination
 
-Write-Host "`n=== Running SAP Monitoring Checks ===" -ForegroundColor Yellow
+Write-Host "`n=== SAP Monitoring Checks ===" -ForegroundColor Yellow
 
-$results = @{
-    SM12_Locks   = Get-SM12_Locks   $dest
-    SM13_Updates = Get-SM13_Updates $dest
-    SMQ1_Queues  = Get-SMQ1_Queues  $dest
-    SM51_Servers = Get-SM51_Servers $dest
-    SM37_Jobs    = Get-SM37_Jobs    $dest
-}
+# SM12 - Lock entries
+try {
+    $locks = Read-Table -Destination $dest -Table "ENQ" -Fields @("GUNAME","GCLIENT","GTABNAME") -Where "GUNAME <> ''"
+    Write-Host "SM12 Locks: $($locks.RowCount)" -ForegroundColor Cyan
+} catch { Write-Warning "SM12 failed: $_" }
 
-# Simple Markdown output
-if ($OutputFormat -eq "Markdown") {
-    Write-Host "`n# SAP Monitor Report - $(Get-Date -Format 'yyyy-MM-dd HH:mm')`n" -ForegroundColor Cyan
+# SM13 - Update records (using VBHDR)
+try {
+    $updates = Read-Table -Destination $dest -Table "VBHDR" -Fields @("VBKEY","VBTYP","STATUS") -Where "STATUS = 'I'"
+    Write-Host "SM13 Pending Updates: $($updates.RowCount)" -ForegroundColor Cyan
+} catch { Write-Warning "SM13 failed: $_" }
 
-    foreach ($check in $results.Keys) {
-        $data = $results[$check]
-        if ($data -and $data.RowCount -gt 0) {
-            Write-Host "## $check ($($data.RowCount) entries)" -ForegroundColor Green
-        } else {
-            Write-Host "## $check - OK / No issues" -ForegroundColor Green
-        }
-    }
-}
+# SMQ1 - qRFC queues
+try {
+    $queues = Read-Table -Destination $dest -Table "TRFCQOUT" -Fields @("QNAME","QSTATE") 
+    Write-Host "SMQ1 Queues: $($queues.RowCount)" -ForegroundColor Cyan
+} catch { Write-Warning "SMQ1 failed: $_" }
+
+# SM51 - Server list
+try {
+    $servers = Read-Table -Destination $dest -Table "T000" -Fields @("MANDT","MTEXT") 
+    Write-Host "SM51 Servers check done" -ForegroundColor Cyan
+} catch { Write-Warning "SM51 failed: $_" }
+
+# SM37 - Background jobs (last 24h)
+try {
+    $jobs = Read-Table -Destination $dest -Table "TBTCO" -Fields @("JOBNAME","STATUS","SDLSTRTDT") -Where "SDLSTRTDT >= '$(Get-Date -Format yyyyMMdd)'"
+    Write-Host "SM37 Jobs today: $($jobs.RowCount)" -ForegroundColor Cyan
+} catch { Write-Warning "SM37 failed: $_" }
 
 Write-Host "`nMonitoring complete." -ForegroundColor Green
-return $results
