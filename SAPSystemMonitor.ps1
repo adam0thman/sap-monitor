@@ -30,11 +30,36 @@ function Get-NCoDestination {
 }
 
 function Invoke-RfcFunction {
-    param($Destination, [string]$FunctionName, $Parameters)
+    param(
+        $Destination,
+        [string]$FunctionName,
+        [hashtable]$Parameters = @{},
+        [string[]]$TableNames = @()
+    )
+
     $func = $Destination.Repository.CreateFunction($FunctionName)
-    # Add parameter handling...
+
+    # Set importing parameters
+    foreach ($key in $Parameters.Keys) {
+        if ($func.GetImportingParameterList().Contains($key)) {
+            $func.SetValue($key, $Parameters[$key])
+        }
+    }
+
     $func.Invoke($Destination)
-    return $func
+
+    # Handle table output parameters (the fixed pattern)
+    $tables = @{}
+    foreach ($tableName in $TableNames) {
+        if ($func.GetTableParameterList().Contains($tableName)) {
+            $tables[$tableName] = $func.GetTableParameterList().GetTable($tableName)
+        }
+    }
+
+    return @{
+        Function   = $func
+        Tables     = $tables
+    }
 }
 
 # Main monitoring logic placeholder
