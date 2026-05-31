@@ -1,0 +1,21 @@
+# SAP NCo binaries (do not commit)
+*.dll
+sapnco*
+nco/
+
+# Sensitive config
+*.ncoDestination
+*password*
+*.key
+
+# Output
+reports/
+*.html
+*.json
+*.log
+
+# IDE / OS
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
