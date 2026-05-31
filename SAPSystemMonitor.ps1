@@ -2,7 +2,7 @@
 .SYNOPSIS
     SAP BW System Monitor (PowerShell + NCo 3.1)
 .VERSION
-    1.5 - Fixed connection message and restored Read-Table function
+    1.6 - SM12 automated check added
 #>
 
 param(
@@ -13,7 +13,7 @@ param(
     [bool]$DebugMode = $true
 )
 
-$ScriptVersion = "1.5"
+$ScriptVersion = "1.6"
 $RunTimestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 
 Write-Host "========================================" -ForegroundColor DarkGray
@@ -78,20 +78,21 @@ try {
     exit 1
 }
 
-# ==================== TABLE READER ====================
-function Read-Table {
-    param($Destination, [string]$TableName, [int]$MaxRows = 15)
+# ==================== SM12 - Lock Entries ====================
+function Get-SM12_Locks {
+    param($Destination)
     
     try {
-        $func = $Destination.Repository.CreateFunction("RFC_READ_TABLE")
-        $func.SetValue("QUERY_TABLE", $TableName)
-        $func.SetValue("DELIMITER", "|")
-        $func.SetValue("ROWCOUNT", $MaxRows)
+        $func = $Destination.Repository.CreateFunction("ENQUEUE_READ")
+        $func.SetValue("GCLIENT", $config.CLIENT)
+        $func.SetValue("GUNAME", "*")
         
         $func.Invoke($Destination)
-        return $func.GetTableParameterList().GetTable("DATA")
+        
+        $lockTable = $func.GetTableParameterList().GetTable("ENQ")
+        return $lockTable
     } catch {
-        if ($DebugMode) { Write-Host "[DEBUG] RFC_READ_TABLE on $TableName failed: $_" -ForegroundColor DarkGray }
+        if ($DebugMode) { Write-Host "[DEBUG] SM12 (ENQUEUE_READ) failed: $_" -ForegroundColor DarkGray }
         return $null
     }
 }
@@ -101,8 +102,13 @@ function Read-Table {
 Write-Host "`n=== SAP BW Monitoring Report ===" -ForegroundColor Yellow
 Write-Host ""
 
-Write-Host ("SM12 - Lock Entries".PadRight(35) + ": CHECK MANUALLY") -ForegroundColor Yellow
+# SM12 - Automated
+$locks = Get-SM12_Locks -Destination $dest
+$lockCount = if ($locks) { $locks.RowCount } else { 0 }
+
+Write-Host ("SM12 - Lock Entries".PadRight(35) + ": $lockCount locks") -ForegroundColor Cyan
 Write-Host ("   Threshold : No obsolete locks > 24 hours") -ForegroundColor DarkGray
+Write-Host ("   Result    : $lockCount locks found") -ForegroundColor DarkGray
 Write-Host ""
 
 Write-Host ("SM13 - Update Status".PadRight(35) + ": CHECK MANUALLY") -ForegroundColor Yellow
