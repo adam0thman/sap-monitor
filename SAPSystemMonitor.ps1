@@ -1,19 +1,35 @@
 <#
 .SYNOPSIS
     SAP System Monitor using NCo 3.1 (PowerShell)
+.VERSION
+    0.4
 #>
 
 param(
     [Parameter(Mandatory=$true)]
     [string]$Destination,
+
     [ValidateSet("Markdown","JSON","HTML")]
-    [string]$OutputFormat = "Markdown"
+    [string]$OutputFormat = "Markdown",
+
+    [bool]$DebugMode = $true
 )
+
+$ScriptVersion = "0.4"
+$RunTimestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+
+Write-Host "========================================" -ForegroundColor DarkGray
+Write-Host "SAP Monitor v$ScriptVersion" -ForegroundColor Cyan
+Write-Host "Run Time : $RunTimestamp" -ForegroundColor DarkGray
+Write-Host "Destination : $Destination" -ForegroundColor DarkGray
+Write-Host "Debug Mode : $DebugMode" -ForegroundColor DarkGray
+Write-Host "========================================`n" -ForegroundColor DarkGray
 
 # Load NCo
 $ncoPaths = @(".\sapnco.dll", "$PSScriptRoot\sapnco.dll") | Where-Object { Test-Path $_ }
 if ($ncoPaths) {
     $dll = $ncoPaths | Select-Object -First 1
+    if ($DebugMode) { Write-Host "[DEBUG] Loading NCo from: $dll" -ForegroundColor DarkGray }
     Add-Type -Path $dll
     Add-Type -Path ($dll -replace 'sapnco\.dll$', 'sapnco_utils.dll')
 } else {
@@ -32,12 +48,11 @@ function Read-Table {
     $func.SetValue("QUERY_TABLE", $Table)
     $func.SetValue("DELIMITER", "|")
     
-    # Safely get table parameters
     $paramList = $null
     try {
         $paramList = $func.GetTableParameterList()
     } catch {
-        Write-Warning "GetTableParameterList() not available on this NCo version"
+        if ($DebugMode) { Write-Host "[DEBUG] GetTableParameterList() not available" -ForegroundColor DarkGray }
         return $null
     }
     
