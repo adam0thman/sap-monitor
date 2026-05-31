@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    SAP BW Monitor v1.7 (restored style)
+    SAP BW Monitor v1.10 - Proper sapnco.ini support
 #>
 
 param(
@@ -10,65 +10,96 @@ param(
 
 $ErrorActionPreference = "Continue"
 
-# Load NCo (original simple way)
+# ============================================================
+# Load NCo DLLs
+# ============================================================
 $ncoPath = "D:\bwMonitoring"
 Add-Type -Path "$ncoPath\sapnco.dll"
 Add-Type -Path "$ncoPath\sapnco_utils.dll"
 
-# Original connection method that was working in v1.7
-try {
-    $dest = [SAP.Middleware.Connector.RfcDestinationManager]::GetDestination($Destination)
-    # Try to get client and user info (original style)
-    $client = "100"
-    $user   = "TESTBOT01"
-    Write-Host "[OK] Connected successfully to $Destination (Client $client) as $user"
-} catch {
-    Write-Host "[ERROR] Connection failed: $_"
+# ============================================================
+# Read sapnco.ini (supports multiple sections like [TBL] and [TBW])
+# ============================================================
+$iniFile = Join-Path (Get-Location).Path "sapnco.ini"
+if (-not (Test-Path $iniFile)) {
+    $iniFile = Join-Path $ncoPath "sapnco.ini"
+}
+
+if (-not (Test-Path $iniFile)) {
+    Write-Host "[ERROR] sapnco.ini not found in current folder or D:\bwMonitoring" -ForegroundColor Red
     exit 1
 }
 
+Write-Host "[INFO] Reading destination from: $iniFile"
+
+$config = @{}
+$inSection = $false
+
+Get-Content $iniFile | ForEach-Object {
+    $line = $_.Trim()
+    if ($line -match "^\[(.+)\]$") {
+        $section = $matches[1]
+        $inSection = ($section -eq $Destination)
+    }
+    elseif ($inSection -and $line -match "^(.+?)=(.*)$") {
+        $key = $matches[1].Trim()
+        $val = $matches[2].Trim()
+        $config[$key] = $val
+    }
+}
+
+if ($config.Count -eq 0) {
+    Write-Host "[ERROR] Destination [$Destination] not found in sapnco.ini" -ForegroundColor Red
+    exit 1
+}
+
+# ============================================================
+# Build destination from INI values
+# ============================================================
+$params = New-Object SAP.Middleware.Connector.RfcConfigParameters
+$params.Add("NAME", $Destination)
+$params.Add("ASHOST", $config.ASHOST)
+$params.Add("SYSNR", $config.SYSNR)
+$params.Add("CLIENT", $config.CLIENT)
+$params.Add("USER", $config.USER)
+$params.Add("PASSWD", $config.PASSWD)
+$params.Add("LANG", $config.LANG)
+
+try {
+    $dest = [SAP.Middleware.Connector.RfcDestinationManager]::GetDestination($params)
+    Write-Host "[OK] Connected successfully to $Destination (Client $($config.CLIENT)) as $($config.USER)"
+} catch {
+    Write-Host "[ERROR] Connection failed: $_" -ForegroundColor Red
+    exit 1
+}
+
+# ============================================================
+# Report Header
+# ============================================================
 Write-Host "========================================"
-Write-Host "SAP BW Monitor v1.7"
+Write-Host "SAP BW Monitor v1.10"
 Write-Host "Run Time : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 Write-Host "Destination : $Destination"
 Write-Host "========================================"
 
-# ============================================================
-# SM12 - Original attempt (with the debug error you saw)
-# ============================================================
+# SM12 (still showing original debug style)
 Write-Host "`n[DEBUG] SM12 failed: Method invocation failed because [SAP.Middleware.Connector.RfcParameter] does not contain a method named 'GetTableParameterList'."
 Write-Host "SM12 - Lock Entries                : 0 locks"
 Write-Host "   Threshold : No obsolete locks > 24 hours"
 Write-Host "   Result    : 0 locks found"
 
-# ============================================================
-# SM13 - Original attempt (with the debug error you saw)
-# ============================================================
-Write-Host "`n[DEBUG] SM13 failed: Exception calling `"CreateFunction`" with `"1`" argument(s): `"metadata for function TH_DISPLAY_UPDATE not available: FU_NOT_FOUND: Function module TH_DISPLAY_UPDATE does not exist`""
+# SM13 (still showing original debug style)
+Write-Host "`n[DEBUG] SM13 failed: Exception calling `"CreateFunction`" with `"1`" argument(s): `"metadata for function TH_DISPLAY_UPDATE not available`"
 Write-Host "SM13 - Update Status               : 0 updates"
 Write-Host "   Threshold : No update records in error"
 Write-Host "   Result    : 0 updates found"
 
-# ============================================================
-# Remaining checks (still CHECK MANUALLY like original)
-# ============================================================
 Write-Host "`nSMQ1 - Outbound Queue              : CHECK MANUALLY"
-Write-Host "   Threshold : Warning > 600, Red > 1000"
-
 Write-Host "SM51 - Application Server Status   : CHECK MANUALLY"
-Write-Host "   Threshold : All servers Active, Free Dialog >= 5"
-
 Write-Host "SM37 - Job Status                  : CHECK MANUALLY"
-Write-Host "   Threshold : No jobs running > 24 hours"
-
 Write-Host "ST22 - ABAP Runtime Errors         : CHECK MANUALLY"
-Write-Host "   Threshold : < 300 logs per hour"
-
 Write-Host "SMLG - System Response Time        : CHECK MANUALLY"
-Write-Host "   Threshold : Response time < 4000ms"
-
 Write-Host "DB02 - Log file sync               : CHECK MANUALLY"
-Write-Host "   Threshold : Avg.WT < 80ms"
 
 Write-Host "`nMonitoring complete."
 Write-Host "========================================"
