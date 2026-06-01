@@ -1,0 +1,16 @@
+# SAP NCo destination template
+#
+# Copy to "<NAME>.ncoDestination" (e.g. S4D.ncoDestination) and fill in real values.
+# Real .ncoDestination files are git-ignored so credentials are never committed.
+#
+#   Copy-Item S4D.ncoDestination.template S4D.ncoDestination
+
+ASHOST=your-sap-host
+SYSNR=00
+CLIENT=100
+USER=MONITOR_USER
+PASSWD=changeme
+LANG=EN
+
+# Optional: SAProuter string if connecting through one
+# SAPROUTER=/H/saprouter-host/S/3299
