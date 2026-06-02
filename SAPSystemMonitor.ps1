@@ -76,6 +76,12 @@ function Get-StatusText {
     switch ($Code) { 0 { "OK" } 1 { "WARNING" } 2 { "CRITICAL" } default { "UNKNOWN" } }
 }
 
+# Return the first non-empty value (NCo Attributes can come back blank before a call is made).
+function Get-FirstNonEmpty {
+    param($A, $B)
+    if ($A) { $A } else { $B }
+}
+
 # Read destination parameters from "<name>.ncoDestination" or an sapnco.ini section.
 function Get-DestinationConfig {
     param([string]$Name)
@@ -144,14 +150,11 @@ function Test-Locks {
         return $r
     } catch {
         $r.PrimaryResult = "Not available"
-        $r.Fallback = "RFC_READ_TABLE on ENQID"
-    }
-    try {
-        $fn = Invoke-Rfc $Dest "RFC_READ_TABLE" @{ QUERY_TABLE = "ENQID"; DELIMITER = "|"; ROWCOUNT = 100 }
-        $count = $fn.GetTable("DATA").RowCount
-        $r.FallbackResult = "$count locks (sample)"
-    } catch {
-        $r.FallbackResult = "Failed"; $r.Status = "SKIPPED"
+        # Lock entries live in the enqueue server's memory, not a transparent table, so there is no
+        # RFC_READ_TABLE fallback. This check needs ENQUEUE_READ to be remote-enabled / authorized.
+        $r.Fallback = "None (locks are not table-readable)"
+        $r.FallbackResult = "Requires ENQUEUE_READ (RFC-enabled)"
+        $r.Status = "SKIPPED"
     }
     return $r
 }
@@ -163,7 +166,13 @@ function Test-Updates {
     $r.Threshold = "informational only"
     $r.Primary = "RFC_READ_TABLE on VBMOD"
     try {
-        $fn = Invoke-Rfc $Dest "RFC_READ_TABLE" @{ QUERY_TABLE = "VBMOD"; DELIMITER = "|"; ROWCOUNT = 100 }
+        # Trim to key fields: reading all columns can exceed the 512-byte RFC_READ_TABLE row buffer.
+        $fn = $Dest.Repository.CreateFunction("RFC_READ_TABLE")
+        $fn.SetValue("QUERY_TABLE", "VBMOD")
+        $fn.SetValue("DELIMITER", "|")
+        $fields = $fn.GetTable("FIELDS")
+        foreach ($f in @("VBKEY", "VBMODCNT")) { Add-TableRow $fields "FIELDNAME" $f }
+        $fn.Invoke($Dest)
         $count = $fn.GetTable("DATA").RowCount
         $r.PrimaryResult = "$count update records"
     } catch {
@@ -187,7 +196,13 @@ function Test-Queues {
         $r.Fallback = "RFC_READ_TABLE on TRFCQOUT"
     }
     try {
-        $fn = Invoke-Rfc $Dest "RFC_READ_TABLE" @{ QUERY_TABLE = "TRFCQOUT"; DELIMITER = "|"; ROWCOUNT = 100 }
+        # Trim to key fields: reading all columns can exceed the 512-byte RFC_READ_TABLE row buffer.
+        $fn = $Dest.Repository.CreateFunction("RFC_READ_TABLE")
+        $fn.SetValue("QUERY_TABLE", "TRFCQOUT")
+        $fn.SetValue("DELIMITER", "|")
+        $fields = $fn.GetTable("FIELDS")
+        foreach ($f in @("QNAME", "QSTATE")) { Add-TableRow $fields "FIELDNAME" $f }
+        $fn.Invoke($Dest)
         $count = $fn.GetTable("DATA").RowCount
         $r.FallbackResult = "$count qRFC records"
     } catch {
@@ -402,8 +417,31 @@ function Test-ResponseTimes {
             $r.Detail += ("{0} : {1:N0} ms  (DIALOG, {2} day(s) ago)  -> {3}" -f $server, $res.AvgMs, $res.DaysAgo, $st)
         }
         $r.PrimaryResult = "$measured of $total server(s) had dialog data"
+        return $r
     } catch {
-        $r.PrimaryResult = "Not available"; $r.Fallback = "Not available"; $r.Status = "SKIPPED"
+        $r.PrimaryResult = "Not available"
+        $r.Fallback = "SWNC on connected instance (RFC_GET_SYSTEM_INFO)"
+    }
+
+    # Fallback: TH_SERVER_LIST is unavailable, so measure only the instance we're connected to.
+    # RFC_GET_SYSTEM_INFO is a basic RFC-enabled FM and also yields the SID, avoiding the blank-attr case.
+    try {
+        $si = Invoke-Rfc $Dest "RFC_GET_SYSTEM_INFO" @{}
+        $rfcsi  = $si.GetStructure("RFCSI_EXPORT")
+        $server = $rfcsi.GetString("RFCDEST")
+        $sysid  = if ($rfcsi.GetString("RFCSYSID")) { $rfcsi.GetString("RFCSYSID") } else { $Sid }
+        $res = Get-DialogAvgMs $Dest $sysid $server
+        if ($null -eq $res) {
+            $r.FallbackResult = "no dialog workload data (last $RESPTIME_LOOKBACK_DAYS days)"
+            $r.Status = "SKIPPED"
+        } else {
+            $st = if ($res.AvgMs -gt $RESPTIME_WARN_MS) { "WARNING" } else { "OK" }
+            if ($st -eq "WARNING") { $r.Status = "WARNING"; $r.Code = $EXIT_WARNING }
+            $r.FallbackResult = "1 server measured (connected instance)"
+            $r.Detail += ("{0} : {1:N0} ms  (DIALOG, {2} day(s) ago)  -> {3}" -f $server, $res.AvgMs, $res.DaysAgo, $st)
+        }
+    } catch {
+        $r.FallbackResult = "Failed"; $r.Status = "SKIPPED"
     }
     return $r
 }
@@ -528,25 +566,27 @@ try {
     exit $EXIT_CRITICAL
 }
 
+# Prefer the live connection attributes, but fall back to the destination config when NCo
+# returns blank attributes (otherwise SYSID/Client/User render empty and feed empty params downstream).
 $info = [PSCustomObject]@{
     Version     = $VERSION
     RunDate     = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
     Destination = $Destination
     Ashost      = $config.ASHOST
-    Sysid       = $attr.SystemID
-    Client      = $attr.Client
-    User        = $attr.User
+    Sysid       = (Get-FirstNonEmpty $attr.SystemID $config.SYSID)
+    Client      = (Get-FirstNonEmpty $attr.Client $config.CLIENT)
+    User        = (Get-FirstNonEmpty $attr.User $config.USER)
 }
 
 # Run checks (graceful: a thrown check degrades to SKIPPED, never aborts the run)
 $results = @(
-    Test-Locks         $dest $attr.Client
+    Test-Locks         $dest $info.Client
     Test-Updates       $dest
     Test-Queues        $dest
     Test-Servers       $dest
-    Test-Jobs          $dest $attr.User
+    Test-Jobs          $dest $info.User
     Test-Dumps         $dest
-    Test-ResponseTimes $dest $attr.SystemID
+    Test-ResponseTimes $dest $info.Sysid
 )
 
 $overall = ($results | Measure-Object -Property Code -Maximum).Maximum
